@@ -34,6 +34,9 @@ var axiosInstance = axios.create({
 // => CLASSES
 // ======================================================
 class DatabasesHandler {
+  constructor() {
+    this.databases = {}
+  }
   /**
    * Store databases.
    *
@@ -55,6 +58,21 @@ class DatabasesHandler {
   insertData(field, key) {
     Object.keys(this.databases).forEach(key => {
       this.databases[key].insertData(field, key)
+    })
+  }
+  updateRequest(number_data) {
+    Object.keys(this.databases).forEach(key => {
+      this.databases[key].updateRequest(number_data)
+    })
+  }
+  send(err, number_data) {
+    Object.keys(this.databases).forEach(async (key) => {
+      try {
+        await this.databases[key].send(err, number_data)
+      } catch (error) {
+        // console.log(error);
+
+      }
     })
   }
 }
@@ -389,83 +407,70 @@ class MySQLSender {
 
   }
 
-  initSql(callback, err_f) {
-    this.mysql_connection.connect((err) => {
-      if (err) err_f()
-      else
-        callback()
-    });
+  updateRequest(number_data) {
+    let keys = Object.keys(this.data)
+    this.dropTable()
+    if (keys.length >= 1)
+      this.createTable(this.data[keys[0]], number_data)
+    for (const k of keys) {
+      this.insertSQLData(this.data[k], number_data)
+    }
+    this.data = {}
+
   }
 
-  async send(err_f) {
-    this.mysql_connection.connect((err) => {
-      if (err) err_f()
-      else {
-        this.mysql_connection.query(this.queries, this.prepared)
-      }
-
-    });
-
-    let keys = Object.keys(this.data)
-    var forced = false
-
-    await this.dropTable().catch(async () => {
-      await this.dropTable(true)
+  send(err_f) {
+    return new Promise((resolve, reject) => {
+      this.mysql_connection.connect((err) => {
+        if (err) err_f()
+        else {
+          this.mysql_connection.query(this.queries, this.prepared, (err, results) => {
+            if (err) {
+              reject(new Error(400))
+            } else {
+              this.queries = ""
+              this.prepared = []
+              this.mysql_connection.end()
+              resolve()
+            }
+          })
+        }
+      });
     })
-    if (keys.length >= 1)
-      await this.createTable(this.data[keys[0]]).catch(async () => {
-        forced = true
-        await this.createTable(this.data[keys[0]], true).catch((d => console.log(d.sqlMessage)))
-      })
+  }
 
-    for (const k of keys) {
-      await this.insertSQLData(this.data[k], forced).catch(d => console.log(d.sqlMessage))
+  insertSQLData(data, number_data) {
+    let begin = 'INSERT INTO `' + this.form.id + '` ('
+    let to_add = ""
+    let arr = []
+
+    for (let i = 0; i < data.length / number_data; i++) {
+      begin += data[i].name + (i != (data.length / number_data) - 1 ? "," : "")
+    }
+    for (let j = 0, k = 0; j < number_data; j++) {
+      for (let i = 0; i < (data.length / number_data); i++) {
+        to_add += "?,"
+        arr.push(data[k++].value)
+      }
+      to_add = to_add.substring(0, to_add.length - 1);
+      this.queries += begin + ") VALUES (" + to_add + ");"
+      this.prepared = this.prepared.concat(arr)
+      to_add = ""
+      arr = []
+
     }
 
   }
 
-  async insertSQLData(data, force) {
-    return new Promise((resolve, reject) => {
-      let _ite_ = 0
-      let query = 'INSERT INTO `' + (force ? this.form.id : this.form.name) + '` ('
-      let to_add = ""
-      let arr = []
-      data.forEach(d => {
-        query += d.name + (_ite_ != data.length - 1 ? "," : "")
-        to_add += "?" + (_ite_ != data.length - 1 ? "," : "")
-        arr.push(d.value)
-        _ite_++
-      })
-      query += ") VALUES (" + to_add + ")"
-      this.mysql_connection.query(query, arr, (err2, result) => {
-        if (err2) reject(err2);
-        resolve()
-      });
-    })
+  dropTable() {
+    this.queries += 'DROP TABLE IF EXISTS `' + this.form.id + "`;"
   }
 
-  async dropTable(force = false) {
-    return new Promise((resolve, reject) => {
-      let query = 'DROP TABLE IF EXISTS `' + (force ? this.form.id : this.form.name) + "`"
-      this.mysql_connection.query(query, (err2, result) => {
-        if (err2) reject(err2);
-        resolve()
-      });
-    })
-  }
-
-  async createTable(selected_data, force = false) {
-    return new Promise((resolve, reject) => {
-      let query = 'CREATE TABLE `' + (force ? this.form.id : this.form.name) + '` (id INT AUTO_INCREMENT PRIMARY KEY'
-      selected_data.forEach(data => {
-        query += "," + data.name + " " + data.type
-      })
-      query += ")"
-      this.mysql_connection.query(query, (err2, result) => {
-        if (err2) reject(err2);
-        resolve()
-      });
-    })
+  createTable(selected_data, number_data) {
+    this.queries += 'CREATE TABLE `' + this.form.id + '` (id INT AUTO_INCREMENT PRIMARY KEY'
+    for (let i = 0; i < selected_data.length / number_data; i++)
+      this.queries += "," + selected_data[i].name + " " + selected_data[i].type
+    this.queries += ");"
   }
 }
 
@@ -717,31 +722,11 @@ function sendAllData(forms, db_handler, connection, callback, err_f, iterator = 
           db_handler.insertData(field, key)
         })
       });
-
-      if (mysql_db)
-        mysql_db.initSql(async () => {
-          await mysql_db.send()
-          data_sent++
-          if (data_sent == 0)
-            sendAllData(forms, db, connection, callback, err_f, iterator + 1)
-        }, () => {
-          err_f()
-        })
-      if (postgressql_db)
-        postgressql_db.initSql(async () => {
-          await postgressql_db.send()
-          data_sent++
-          if (data_sent == 0)
-            sendAllData(forms, db, connection, callback, err_f, iterator + 1)
-        }, () => {
-          err_f()
-        })
+      db_handler.updateRequest(keys.length)
+      sendAllData(forms, db_handler, connection, callback, err_f, iterator + 1)
     })
   } else {
-    if (postgres_done) {
-      postgres_done()
-      postgres_client = null
-    }
+    db_handler.send(err_f)
     callback()
   }
 }
