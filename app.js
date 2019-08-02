@@ -16,9 +16,6 @@ const kizeo_api_uri = "https://www.kizeoforms.com:443/rest/v3/"
 const default_port = 59476
 var tokens = {}
 var server = null
-var postgres_client = null
-var postgres_done = null
-var data_sent = 0
 var databases_handler = null
 var connections = []
 var axiosInstance = axios.create({
@@ -102,6 +99,8 @@ class PostgresSender {
     })
     this.data = {}
     this.form = null
+    this.queries = ""
+    this.prepared = []
   }
 
   insertData(data, data_id) {
@@ -201,96 +200,85 @@ class PostgresSender {
 
   }
 
-  initSql(callback, err_f) {
+  updateRequest(number_data) {
+    let keys = Object.keys(this.data)
+    this.dropTable()
+    if (keys.length >= 1)
+      this.createTable(this.data[keys[0]], number_data)
+    for (const k of keys) {
+      this.insertSQLData(this.data[k], number_data)
+    }
+    this.data = {}
+  }
 
 
-    if (!postgres_client) {
-      this.postgres_connection.connect((err, client, done) => {
+  send(err_f) {
+    return new Promise((resolve, reject) => {
+
+      this.chunkQueries(this.queries.split(";"), this.prepared, () => {
+        this.queries = ""
+        this.prepared = []
+        this.postgres_connection.end()
+        resolve()
+      }, () => {
+        reject(new Error(400))
+
+      })
+    })
+  }
+  chunkQueries(queries, prepared, callback, error) {
+    if (queries[0] != '') {
+      let splitted = queries[0].split("$")
+      let to_prepare = splitted.length - 1
+      let final_query = splitted[0]
+      let final_prepare = []
+
+      for (let i = 0; i < to_prepare; i++) {
+        final_query += "$" + (i + 1) + splitted[i + 1].replace(/\d*/g, "")
+        final_prepare.push(prepared.shift())
+      }
+
+      this.postgres_connection.query(final_query, final_prepare == [] ? undefined : final_prepare, (err, r) => {
         if (err)
-          err_f()
-        else {
-          postgres_client = client
-          postgres_done = done
-          callback()
-        }
+          error()
+        queries.shift()
+        this.chunkQueries(queries, prepared, callback, error)
       })
     } else {
-
       callback()
     }
   }
+  insertSQLData(data, number_data) {
+    let begin = 'INSERT INTO \"' + this.form.id + '\" ('
+    let to_add = ""
+    let arr = []
 
-  async send() {
-
-    let keys = Object.keys(this.data)
-    var forced = false
-
-    await this.dropTable().catch(async (d) => {
-      await this.dropTable(client, true).catch(d => console.log(d))
-    })
-    if (keys.length >= 1) {
-      await this.createTable(this.data[keys[0]]).catch(async () => {
-        forced = true
-        await this.createTable(this.data[keys[0]], true).catch((d => console.log(d)))
-      })
-
-      for (const k of keys) {
-        await this.insertSQLData(this.data[k], forced).catch(d => console.log(d))
-      }
+    for (let i = 0; i < data.length / number_data; i++) {
+      begin += data[i].name + (i != (data.length / number_data) - 1 ? "," : "")
     }
-
-
-  }
-
-  async insertSQLData(data, force) {
-    return new Promise((resolve, reject) => {
-      let _ite_ = 0
-      let query = "INSERT INTO \"" + (force ? this.form.id : this.form.name) + "\" ("
-      let to_add = ""
-      let arr = []
-      data.forEach(d => {
-        query += d.name + (_ite_ != data.length - 1 ? "," : "")
-        to_add += "$" + (arr.length + 1) + (_ite_ != data.length - 1 ? "," : "")
-        arr.push(d.value)
-        _ite_++
-      })
-      query += ") VALUES (" + to_add + ")"
-
-      if (arr.length != 0) {
-        postgres_client.query(query, arr, (err2, result) => {
-          if (err2) reject(err2);
-          resolve()
-        });
-      } else {
-        resolve()
+    for (let j = 0, k = 0; j < number_data; j++) {
+      for (let i = 0; i < (data.length / number_data); i++) {
+        to_add += `$${(k+1)},`
+        arr.push(data[k++].value)
       }
-    })
+      to_add = to_add.substring(0, to_add.length - 1);
+      this.queries += begin + ") VALUES (" + to_add + ");"
+      this.prepared = this.prepared.concat(arr)
+      to_add = ""
+      arr = []
+
+    }
   }
 
-  async dropTable(force = false) {
-    return new Promise((resolve, reject) => {
-      let query = "DROP TABLE IF EXISTS \"" + (force ? this.form.id : this.form.name) + "\""
-
-      postgres_client.query(query, (err2, result) => {
-        if (err2) reject(err2);
-        resolve()
-      });
-    })
+  dropTable() {
+    this.queries += 'DROP TABLE IF EXISTS \"' + this.form.id + "\";"
   }
 
-  async createTable(selected_data, force = false) {
-    return new Promise((resolve, reject) => {
-      let query = "CREATE TABLE \"" + (force ? this.form.id : this.form.name) + "\" (id serial PRIMARY KEY"
-      selected_data.forEach(data => {
-        query += "," + data.name + " " + data.type
-      })
-      query += ")"
-
-      postgres_client.query(query, (err2, result) => {
-        if (err2) reject(err2);
-        resolve()
-      });
-    })
+  createTable(selected_data, number_data) {
+    this.queries += 'CREATE TABLE \"' + this.form.id + '\" (id serial PRIMARY KEY'
+    for (let i = 0; i < selected_data.length / number_data; i++)
+      this.queries += "," + selected_data[i].name + " " + selected_data[i].type
+    this.queries += ");"
   }
 }
 
@@ -416,7 +404,6 @@ class MySQLSender {
       this.insertSQLData(this.data[k], number_data)
     }
     this.data = {}
-
   }
 
   send(err_f) {
@@ -459,7 +446,6 @@ class MySQLSender {
       arr = []
 
     }
-
   }
 
   dropTable() {
